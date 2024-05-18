@@ -1,6 +1,7 @@
 #include <ImageMagick/Magick++.h>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <cstdint>
 extern "C" {
     #include <pixman.h>
@@ -11,10 +12,11 @@ extern "C" {
 
 class Epd {
     Magick::Image palette;
-    std::fstream fd;
-    std::string buf;
+    int fd;
+    char buf[1024];
+    std::ostringstream buf2;
 
-    bool expectOkReply();
+    bool expectOkReply(struct timeval timeout);
 public:
     Epd();
     ~Epd();

@@ -2,10 +2,15 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <string_view>
 #include <string>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <termios.h>
 
-void errorUnexpectedReply(const std::string& buf) {
+void errorUnexpectedReply(const std::string_view& buf) {
     std::cerr << "epd: ERROR: unexpected reply\n";
     std::cerr << "  reply: \"";
     size_t i;
@@ -21,54 +26,88 @@ void errorUnexpectedReply(const std::string& buf) {
     std::cerr << "\n";
 }
 
-bool Epd::expectOkReply() {
-    fd.flush();
-
+bool Epd::expectOkReply(struct timeval timeout) {
     bool ok = false;
     bool error = false;
+    size_t num_bytes = 0;
     while (1) {
         if (ok || error) {
-            // read more data but only if more data is available
-            char c;
-            if (!fd.readsome(&c, 1))
-                break;
-            fd.unget();
-        } else {
-            char c;
-            fd.read(&c, 1);
-            fd.unget();
-        }
-        if (!std::getline(fd, buf))
-            break;
-        if (!fd) {
-            std::cerr << "epd: ERROR: error in read\n";
-            return false;
-        }
-        if (buf[buf.length()-1] == '\r')
-            buf.erase(buf.end()-1);
-        std::cerr << "DEBUG: reply of length " << buf.length() << "\n";
-        if (buf == "OK") {
-            ok = true;
-            continue;
-        } else if (buf == "") {
-            continue;
-        } else if (buf.length() >=2 && buf[1] == ':') {
-            switch (buf[0]) {
-                case 'E':
-                    std::cerr << "epd: received ERROR: " << buf << "\n";
-                    error = true;
-                    continue;
-                case 'W':
-                    std::cerr << "epd: received WARN: " << buf << "\n";
-                    continue;
-                case 'I':
-                    std::cerr << "epd: received INFO: " << buf << "\n";
-                    continue;
-            }
+            timeout = { 0, 0 };
         }
 
-        errorUnexpectedReply(buf);
-        error = true;
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        //NOTE Timeout is modified to contain the remaining time - which is what we want.
+        //NOTE This is only true on Linux.
+        if (!select(fd+1, &fds, nullptr, nullptr, &timeout)) {
+            if (ok)
+                return true;
+            else if (error)
+                return false;
+            else {
+                std::cerr << "epd: ERROR: timeout in read\n";
+                return false;
+            }
+        }
+        auto n = read(fd, buf+num_bytes, sizeof(buf)-num_bytes-1);
+        if (n < 0 && errno == EAGAIN) {
+            continue;
+        } else if (n <= 0) {
+            std::cerr << "ERROR: Couldn't read from $EPD_TTY\n";
+            perror("ERROR");
+            return false;
+        }
+        //std::cerr << "DEBUG: reply with " << n << " bytes, total in buffer is " << (num_bytes+n) << "\n";
+        num_bytes += n;
+        buf[num_bytes] = 0;
+
+        char* line_start = buf;
+        char* line_end;
+        while ((line_end = (char*)memchr(line_start, '\n', buf+sizeof(buf)-line_start))) {
+            *line_end = 0;
+            auto line_end2 = line_end;
+            if (line_end2[-1] == '\r') {
+                line_end2[-1] = 0;
+                line_end2--;
+            }
+            std::string_view line(line_start, line_end2-line_start);
+
+            //std::cerr << "DEBUG: reply with line of length " << line.length() << "\n";
+            if (line == "OK") {
+                ok = true;
+            } else if (line == "") {
+                // ignore
+            } else if (line.length() >=2 && line[1] == ':') {
+                switch (line[0]) {
+                    case 'E':
+                        std::cerr << "epd: received ERROR: " << line << "\n";
+                        error = true;
+                        break;
+                    case 'W':
+                        std::cerr << "epd: received WARN: " << line << "\n";
+                        break;
+                    case 'I':
+                        std::cerr << "epd: received INFO: " << line << "\n";
+                        break;
+                    default:
+                        errorUnexpectedReply(line);
+                        error = true;
+                        break;
+                }
+            } else {
+                errorUnexpectedReply(line);
+                error = true;
+                break;
+            }
+
+            line_start = line_end+1;
+        }
+
+        if (line_start != buf) {
+            num_bytes -= line_start-buf;
+            memmove(buf, line_start, num_bytes);
+        }
     }
 
     if (!ok && !error)
@@ -92,17 +131,55 @@ Epd::Epd()
         exit(1);
     }
 
-    std::cerr << "epd: send init command to display on path " << path << "\n";
-    fd.open(path);
-
-    // not using ignore() because that has a different semantic (it will block)
-    buf.resize(1024);
-    fd.readsome(buf.data(), sizeof(buf));
-
-    fd << "\x03\n\nI\n";
-    fd.flush();
-    if (!expectOkReply()) {
+    fd = open(path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        std::cerr << "ERROR: Couldn't open $EPD_TTY: " << path << "\n";
+        perror("ERROR");
         exit(1);
+    }
+
+    // change settings
+    struct termios t;
+    if (tcgetattr(fd, &t) < 0) {
+        perror("ERROR in tcgetattr");
+        exit(1);
+    }
+    t.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
+                | INLCR | IGNCR | ICRNL | IXON);
+    t.c_oflag &= ~OPOST;
+    t.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    t.c_cflag &= ~(CSIZE | PARENB);
+    t.c_cflag |= CS8;
+    cfsetospeed(&t, B115200);
+    if (tcsetattr(fd, TCSANOW, &t) < 0) {
+        perror("ERROR in tcsetattr");
+        exit(1);
+    }
+
+    for (int i=1; ; i++) {
+        // abort partial commands
+        write(fd, "\x03\r\n\r\n", 3);
+
+        // discard previous data without blocking
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        struct timeval timeout = { 0, 10000 };  // 10 ms
+        if (select(fd+1, &fds, nullptr, nullptr, &timeout)) {
+            read(fd, buf, sizeof(buf));
+        }
+
+        std::cerr << "epd: send init command to display on path " << path << "\n";
+        write(fd, "I\n", 2);
+        struct timeval timeout2 = { 1, 0 };
+        if (expectOkReply(timeout2)) {
+            break;
+        } else if (i < 3) {
+            continue;
+        } else {
+            std::cerr << "ERROR: We give up!\n";
+            exit(1);
+        }
     }
 }
 
@@ -151,26 +228,66 @@ void Epd::processFrame(Magick::Image& image, struct pixman_region16* damage) {
     }
 
     if (true) {
-        fd << "\x03D\n";
-        auto t1 = palette.pixelColor(1, 0);
-        auto t2 = palette.pixelColor(1, 0);
-        auto t3 = palette.pixelColor(1, 0);
+        buf2.str("");
+        buf2.clear();
+
+        buf2 << "\x03\r\nD\r\n";
+        auto t1 = palette.pixelColor(1, 0).quantumRed();
+        auto t2 = palette.pixelColor(2, 0).quantumRed();
+        auto t3 = palette.pixelColor(3, 0).quantumRed();
         for (int y=0; y<EPD_HEIGHT; y++) {
             for (int x=0; x<EPD_WIDTH; x++) {
-                auto c = image.pixelColor(x, y);
-                if (c.quantumRed() < t1.quantumRed())
-                    fd << ' ';
-                else if (c.quantumRed() < t2.quantumRed())
-                    fd << '-';
-                else if (c.quantumRed() < t3.quantumRed())
-                    fd << '+';
+                auto c = image.pixelColor(x, y).quantumRed();
+                char ch;
+                if (c < t1)
+                    ch = ' ';
+                else if (c < t2)
+                    ch = '-';
+                else if (c < t3)
+                    ch = '+';
                 else
-                    fd << '#';
+                    ch = '#';
+                buf2 << ch;
             }
-            fd << "\n";
+            buf2 << "\n";
         }
-        fd.flush();
 
-        (void)expectOkReply();
+        size_t written = 0;
+        while (written < buf2.str().length()) {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            struct timeval timeout = { 20, 0 };
+            if (!select(fd+1, nullptr, &fds, nullptr, &timeout)) {
+                std::cerr << "epd: ERROR: timeout in write\n";
+                (void)expectOkReply({ 1, 0 });
+                exit(1);
+                return;
+            }
+
+            size_t bytes_to_write = buf2.str().length() - written;
+            if (bytes_to_write > 1024)
+                bytes_to_write = 1024;
+            //std::cerr << "DEBUG: writing " << bytes_to_write << " bytes\n";
+            auto x = write(fd, buf2.str().c_str() + written, bytes_to_write);
+            //std::cerr << "DEBUG: written: " << written << "+" << x << " of " << buf2.str().length() << "\n";
+            if (x < 0 && errno == EAGAIN) {
+                continue;
+            } else if (x < 0) {
+                std::cerr << "ERROR: Couldn't write to $EPD_TTY, x=" << x << ", errno=" << errno << "\n";
+                perror("ERROR");
+                exit(1);
+                return;
+            } else if (x == 0) {
+                std::cerr << "ERROR: $EPD_TTY has been closed\n";
+                exit(1);
+                return;
+            } else {
+                written += x;
+            }
+        }
+
+        struct timeval timeout = { 20, 0 };
+        (void)expectOkReply(timeout);
     }
 }
