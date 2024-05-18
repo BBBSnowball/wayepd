@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <iostream>
 extern "C" {
 #include <neatvnc.h>
 #define AML_UNSTABLE_API 1
@@ -9,6 +10,8 @@ extern "C" {
 #include "fb.h"
 #include <libdrm/drm_fourcc.h>
 }
+
+#include <ImageMagick/Magick++.h>
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
@@ -79,6 +82,9 @@ struct nvnc {
 };
 
 struct nvnc* nvnc_open_generic() {
+    const char* argv[] = { "dummy", NULL };
+    Magick::InitializeMagick(*argv);
+
     auto self = new nvnc();
     self->client.parent = self;
     return self;
@@ -223,6 +229,7 @@ void nvnc_display_feed_buffer(struct nvnc_display* display, struct nvnc_fb* fb,
         printf("    no data\n");
         return;
     }
+    printf("    stride: %d, %d*%d bytes of padding\n", stride, stride - fb->width, ps);
     auto f = fopen("current.ppm", "w");
     // copied from https://rosettacode.org/wiki/Bitmap/Write_a_PPM_file#C
     (void) fprintf(f, "P6\n%d %d\n255\n", fb->width, fb->height);
@@ -239,18 +246,69 @@ void nvnc_display_feed_buffer(struct nvnc_display* display, struct nvnc_fb* fb,
     }
     fclose(f);
 
-    const int dimx = 800, dimy = 800;
-    int i, j;
-    FILE *fp = fopen("first.ppm", "wb"); /* b - binary mode */
-    (void) fprintf(fp, "P6\n%d %d\n255\n", dimx, dimy);
-    for (j = 0; j < dimy; ++j) {
-        for (i = 0; i < dimx; ++i) {
-            static unsigned char color[3];
-            color[0] = i % 256;  /* red */
-            color[1] = j % 256;  /* green */
-            color[2] = (i * j) % 256;  /* blue */
-            (void) fwrite(color, 1, 3, fp);
+    Magick::Image image;
+    Magick::Image palette(Magick::Geometry(4, 1), Magick::Color(0, 0, 0));
+    try {
+        //NOTE We assume that the stride exactly matches line length because ImageMagick doesn't seem to support stride.
+        switch (fb->fourcc_format) {
+        case DRM_FORMAT_XBGR8888:
+            image.read(fb->width, fb->height, "RGBA", Magick::CharPixel, pixels);
+            image.alpha(false);  // 'X' is not alpha but we have to read it as something
+            break;
+        case DRM_FORMAT_XRGB8888:
+            image.read(fb->width, fb->height, "BGRA", Magick::CharPixel, pixels);
+            image.alpha(false);  // 'X' is not alpha but we have to read it as something
+            break;
         }
-    }
-    (void) fclose(fp);
+        // We are using the lite variant of the ImageMagick package, so we cannot use PNG here.
+        image.write("current2.ppm");
+
+        image.quantizeDither(true);
+        //FIXME It looks like we cannot easily select Floyd-Steinberg here
+        //      see https://github.com/ImageMagick/ImageMagick/discussions/6017
+        image.quantizeDitherMethod(Magick::FloydSteinbergDitherMethod);
+        //image.quantizeColorSpace(Magick::HSLColorspace);
+        //image.quantizeColorSpace(Magick::RGBColorspace);
+        if (false) {
+            image.quantizeColors(4);
+            image.quantize();
+        } else {
+            palette.colorSpace(Magick::sRGBColorspace);
+            /*
+            palette.colorMapSize(4);
+            palette.colorMap(0, Magick::Color(0, 0, 0));
+            palette.colorMap(1, Magick::Color(0x55, 0x55, 0x55));
+            palette.colorMap(2, Magick::Color(0xab, 0xab, 0xab));
+            palette.colorMap(3, Magick::Color(0xff, 0xff, 0xff));
+            palette.type(Magick::PaletteType);
+            */
+            palette.pixelColor(0, 0, Magick::ColorGray(0.0));
+            palette.pixelColor(1, 0, Magick::ColorGray(0x55/255.0));
+            palette.pixelColor(2, 0, Magick::ColorGray(0xab/255.0));
+            palette.pixelColor(3, 0, Magick::ColorGray(1.0));
+            //palette.write("dbg1.miff");
+            //palette.read("palette.ppm");
+            //palette.write("dbg2.miff");
+            //printf("DEBUG:a1, " QuantumFormat "\n", image.pixelColor(0, 0).quantumRed());
+            //image.artifact("dither:diffusion-amount", "90%");
+
+            // This would reset the dither method:
+            // see see https://github.com/ImageMagick/ImageMagick/discussions/6017
+            // Why? It calls quantizeDither(), which resets the dither method, as well.
+            //image.map(palette, true);
+            // Thus, we do most of what image.map() would do:
+            image.modifyImage();
+            GetPPException;
+            //options()->quantizeDither(true);  // That's the call that we have to skip.
+            //auto quantizeInfo = image.options()->quantizeInfo();  // we cannot call that :-/
+            MagickCore::QuantizeInfo quantizeInfo;
+            GetQuantizeInfo(&quantizeInfo);
+            quantizeInfo.number_colors = 4;
+            quantizeInfo.dither_method = Magick::FloydSteinbergDitherMethod;
+            RemapImage(&quantizeInfo, image.image(), palette.constImage(), exceptionInfo);
+        }
+        image.write("current3.ppm");
+    } catch(Magick::Exception &error_) {
+        std::cout << "Exception: " << error_.what() << std::endl;
+    } 
 }

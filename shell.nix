@@ -6,6 +6,8 @@ mkShell {
     packages = [
         gdb
         jq
+        #imagemagick_light
+        (imagemagick_light.overrideAttrs (old: { dontStrip = true; }))
     ];
 
     shellHook = "";

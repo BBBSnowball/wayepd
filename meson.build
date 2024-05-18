@@ -53,6 +53,7 @@ drm = dependency('libdrm')
 xkbcommon = dependency('xkbcommon', version: '>=1.0.0')
 wayland_client = dependency('wayland-client')
 jansson = dependency('jansson')
+magick = dependency('Magick++')
 
 aml_version = ['>=0.3.0', '<0.4.0']
 neatvnc_version = ['>=0.7.0', '<0.8.0']
@@ -118,6 +119,7 @@ dependencies = [
 	xkbcommon,
 	client_protos,
 	jansson,
+	magick,
 ]
 
 ctlsources = [
