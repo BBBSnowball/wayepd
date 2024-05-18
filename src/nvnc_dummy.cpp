@@ -71,10 +71,9 @@ struct nvnc_client {
 
 struct nvnc_display {
     struct nvnc_common2 common;
+    struct nvnc* parent;
     uint16_t x_pos;
     uint16_t y_pos;
-
-    Epd epd;
 };
 
 struct nvnc {
@@ -83,6 +82,8 @@ struct nvnc {
     nvnc_client client;
     nvnc_display display;
     nvnc_client_fn client_fn;
+
+    Epd epd;
 };
 
 struct nvnc* nvnc_open_generic() {
@@ -177,10 +178,13 @@ void nvnc_display_ref(struct nvnc_display*) {
 void nvnc_display_unref(struct nvnc_display*) {
 }
 
-void nvnc_add_display(struct nvnc*, struct nvnc_display*) {
+void nvnc_add_display(struct nvnc* parent, struct nvnc_display* display) {
+    display->parent = parent;
 }
 
-void nvnc_remove_display(struct nvnc*, struct nvnc_display*) {
+void nvnc_remove_display(struct nvnc* parent, struct nvnc_display* display) {
+    if (display->parent == parent)
+        display->parent = NULL;
 }
 
 static void on_timer(void* obj) {
@@ -258,7 +262,8 @@ void nvnc_display_feed_buffer(struct nvnc_display* display, struct nvnc_fb* fb,
             return;
         }
 
-        display->epd.processFrame(image, damage);
+        if (display->parent)
+            display->parent->epd.processFrame(image, damage);
     } catch(Magick::Exception &error_) {
         std::cout << "Exception: " << error_.what() << std::endl;
     }
