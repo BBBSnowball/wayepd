@@ -1,6 +1,7 @@
 project(
 	'wayvnc',
 	'c',
+	'cpp',
 	version: '0.7.2',
 	license: 'ISC',
 	default_options: [
@@ -101,6 +102,8 @@ sources = [
 	'src/ctl-commands.c',
 	'src/option-parser.c',
         'src/table-printer.c',
+	'src/nvnc_dummy.cpp',
+	'src/nvnc_fb.c',
 ]
 
 dependencies = [
@@ -111,7 +114,7 @@ dependencies = [
 	gbm,
 	drm,
 	wayland_client,
-	neatvnc,
+	#neatvnc,
 	xkbcommon,
 	client_protos,
 	jansson,
