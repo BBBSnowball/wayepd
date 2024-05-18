@@ -13,6 +13,8 @@ extern "C" {
 
 #include <ImageMagick/Magick++.h>
 
+#include "epd.h"
+
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 extern const char nvnc_version[] = "0.1-dummy";
@@ -71,6 +73,8 @@ struct nvnc_display {
     struct nvnc_common2 common;
     uint16_t x_pos;
     uint16_t y_pos;
+
+    Epd epd;
 };
 
 struct nvnc {
@@ -206,50 +210,40 @@ void nvnc_set_new_client_fn(struct nvnc* self, nvnc_client_fn fn) {
 
 void nvnc_display_feed_buffer(struct nvnc_display* display, struct nvnc_fb* fb,
 			      struct pixman_region16* damage) {
-    printf("nvnc_display_feed_buffer\r\n");
-    printf("  damage:\n    extents: x1=%d, y1=%d, x2=%d, y2=%d\n",
-        damage->extents.x1, damage->extents.y1, damage->extents.x2, damage->extents.y2);
-    int num = 0;
-    pixman_box16_t* rects = pixman_region_rectangles(damage, &num);
-    for (int i=0; i<num; i++) {
-        printf("    rect: x1=%d, y1=%d, x2=%d, y2=%d\n",
-            rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
-    }
-
-    //if (fb->width != 280 || fb->height != 480 || fb->fourcc_format != DRM_FORMAT_XRGB8888) {
-    if (fb->fourcc_format != DRM_FORMAT_XRGB8888 && fb->fourcc_format != DRM_FORMAT_XBGR8888) {
-        printf("    unexpected framebuffer properties\n");
-        return;
-    }
-
     auto pixels = (uint8_t*)nvnc_fb_get_addr(fb);
     auto stride = nvnc_fb_get_stride(fb);
     auto ps = nvnc_fb_get_pixel_size(fb);
     if (!pixels) {
-        printf("    no data\n");
+        printf("nvnc_display_feed_buffer: ERROR: no data\n");
         return;
     }
-    printf("    stride: %d, %d*%d bytes of padding\n", stride, stride - fb->width, ps);
-    auto f = fopen("current.ppm", "w");
-    // copied from https://rosettacode.org/wiki/Bitmap/Write_a_PPM_file#C
-    (void) fprintf(f, "P6\n%d %d\n255\n", fb->width, fb->height);
-    for (int y=0; y<fb->height; y++) {
-        for (int x=0; x<fb->width; x++) {
-            auto pixel = pixels + y*stride*ps + x*ps;
-            if (fb->fourcc_format == DRM_FORMAT_XBGR8888) {
-                fwrite(pixel, 3, 1, f);
-            } else {
-                uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
-                fwrite(rgb, 3, 1, f);
+    //printf("nvnc_display_feed_buffer: stride: %d, %d*%d bytes of padding\n", stride, stride - fb->width, ps);
+
+    if (false) {
+        auto f = fopen("current.ppm", "w");
+        // copied from https://rosettacode.org/wiki/Bitmap/Write_a_PPM_file#C
+        (void) fprintf(f, "P6\n%d %d\n255\n", fb->width, fb->height);
+        for (int y=0; y<fb->height; y++) {
+            for (int x=0; x<fb->width; x++) {
+                auto pixel = pixels + y*stride*ps + x*ps;
+                if (fb->fourcc_format == DRM_FORMAT_XBGR8888) {
+                    fwrite(pixel, 3, 1, f);
+                } else {
+                    uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
+                    fwrite(rgb, 3, 1, f);
+                }
             }
         }
+        fclose(f);
     }
-    fclose(f);
 
-    Magick::Image image;
-    Magick::Image palette(Magick::Geometry(4, 1), Magick::Color(0, 0, 0));
     try {
         //NOTE We assume that the stride exactly matches line length because ImageMagick doesn't seem to support stride.
+        if (fb->width != stride) {
+            printf("nvnc_display_feed_buffer: WARN: We will ignore image stride!\n");
+        }
+
+        Magick::Image image;
         switch (fb->fourcc_format) {
         case DRM_FORMAT_XBGR8888:
             image.read(fb->width, fb->height, "RGBA", Magick::CharPixel, pixels);
@@ -259,56 +253,13 @@ void nvnc_display_feed_buffer(struct nvnc_display* display, struct nvnc_fb* fb,
             image.read(fb->width, fb->height, "BGRA", Magick::CharPixel, pixels);
             image.alpha(false);  // 'X' is not alpha but we have to read it as something
             break;
+        default:
+            printf("nvnc_display_feed_buffer: unexpected framebuffer properties\n");
+            return;
         }
-        // We are using the lite variant of the ImageMagick package, so we cannot use PNG here.
-        image.write("current2.ppm");
 
-        image.quantizeDither(true);
-        //FIXME It looks like we cannot easily select Floyd-Steinberg here
-        //      see https://github.com/ImageMagick/ImageMagick/discussions/6017
-        image.quantizeDitherMethod(Magick::FloydSteinbergDitherMethod);
-        //image.quantizeColorSpace(Magick::HSLColorspace);
-        //image.quantizeColorSpace(Magick::RGBColorspace);
-        if (false) {
-            image.quantizeColors(4);
-            image.quantize();
-        } else {
-            palette.colorSpace(Magick::sRGBColorspace);
-            /*
-            palette.colorMapSize(4);
-            palette.colorMap(0, Magick::Color(0, 0, 0));
-            palette.colorMap(1, Magick::Color(0x55, 0x55, 0x55));
-            palette.colorMap(2, Magick::Color(0xab, 0xab, 0xab));
-            palette.colorMap(3, Magick::Color(0xff, 0xff, 0xff));
-            palette.type(Magick::PaletteType);
-            */
-            palette.pixelColor(0, 0, Magick::ColorGray(0.0));
-            palette.pixelColor(1, 0, Magick::ColorGray(0x55/255.0));
-            palette.pixelColor(2, 0, Magick::ColorGray(0xab/255.0));
-            palette.pixelColor(3, 0, Magick::ColorGray(1.0));
-            //palette.write("dbg1.miff");
-            //palette.read("palette.ppm");
-            //palette.write("dbg2.miff");
-            //printf("DEBUG:a1, " QuantumFormat "\n", image.pixelColor(0, 0).quantumRed());
-            //image.artifact("dither:diffusion-amount", "90%");
-
-            // This would reset the dither method:
-            // see see https://github.com/ImageMagick/ImageMagick/discussions/6017
-            // Why? It calls quantizeDither(), which resets the dither method, as well.
-            //image.map(palette, true);
-            // Thus, we do most of what image.map() would do:
-            image.modifyImage();
-            GetPPException;
-            //options()->quantizeDither(true);  // That's the call that we have to skip.
-            //auto quantizeInfo = image.options()->quantizeInfo();  // we cannot call that :-/
-            MagickCore::QuantizeInfo quantizeInfo;
-            GetQuantizeInfo(&quantizeInfo);
-            quantizeInfo.number_colors = 4;
-            quantizeInfo.dither_method = Magick::FloydSteinbergDitherMethod;
-            RemapImage(&quantizeInfo, image.image(), palette.constImage(), exceptionInfo);
-        }
-        image.write("current3.ppm");
+        display->epd.processFrame(image, damage);
     } catch(Magick::Exception &error_) {
         std::cout << "Exception: " << error_.what() << std::endl;
-    } 
+    }
 }

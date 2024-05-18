@@ -105,6 +105,7 @@ sources = [
         'src/table-printer.c',
 	'src/nvnc_dummy.cpp',
 	'src/nvnc_fb.c',
+	'src/epd.cpp',
 ]
 
 dependencies = [
