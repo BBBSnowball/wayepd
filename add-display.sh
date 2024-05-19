@@ -34,6 +34,8 @@ echo "DEBUG: New display is called $name" >&2
 #     timer in our code.
 #swaymsg output "$name" mode 280x480@0.5Hz >&2
 swaymsg output "$name" mode 280x480@5Hz >&2
+# move it to the left so notifications won't usually go there
+swaymsg -- output "$name" position -300 0
 swaymsg output "$name" enable >&2
 
 if [ "`get_our_output`" != "$name" ] ; then
