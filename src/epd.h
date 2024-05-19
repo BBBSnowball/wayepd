@@ -13,6 +13,7 @@ extern "C" {
 class Epd {
     Magick::Image palette;
     int fd;
+    bool dryRun;
     char buf[1024];
     std::ostringstream buf2;
 

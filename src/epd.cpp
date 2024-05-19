@@ -131,6 +131,14 @@ Epd::Epd()
         exit(1);
     }
 
+    if (strcmp(path, "NONE") == 0) {
+        dryRun = true;
+        fd = 0;
+        return;
+    } else {
+        dryRun = false;
+    }
+
     fd = open(path, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
         std::cerr << "ERROR: Couldn't open $EPD_TTY: " << path << "\n";
@@ -213,7 +221,7 @@ void Epd::processFrame(Magick::Image& image, struct pixman_region16* damage) {
         RemapImage(&quantizeInfo, image.image(), palette.constImage(), exceptionInfo);
     }
     image.write("current3.ppm");
-    image.write("current3.miff");
+    //image.write("current3.miff");
 
     if (true) {
         printf("processFrame\n");
@@ -227,7 +235,7 @@ void Epd::processFrame(Magick::Image& image, struct pixman_region16* damage) {
         }
     }
 
-    if (true) {
+    if (!dryRun) {
         buf2.str("");
         buf2.clear();
 
